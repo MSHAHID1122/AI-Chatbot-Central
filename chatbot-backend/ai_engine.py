@@ -1,33 +1,58 @@
-import logging
-from content_store import get_content_by_key
+from langchain_community.chat_models import ChatOpenAI
+from langchain.prompts import PromptTemplate
+from langchain_chroma import Chroma
+from langchain.schema import Document
 
-logger = logging.getLogger(__name__)
+# Import configs from centralized config.py
+from config import OPENAI_API_KEY, CHROMA_PERSIST_DIR, TOP_K, MAX_TOKENS
+
+# Load Chroma DB
+vectorstore = Chroma(
+    persist_directory=CHROMA_PERSIST_DIR,
+    embedding_function=None  # assumes embedding_function is already persisted
+)
+
+# Load prompts
+PROMPT_TEMPLATES = {
+    "en": PromptTemplate.from_file("prompts/prompt_en.txt", encoding="utf-8"),
+    "ar": PromptTemplate.from_file("prompts/prompt_ar.txt", encoding="utf-8")
+}
+
+# Chat model
+llm = ChatOpenAI(
+    openai_api_key=OPENAI_API_KEY,
+    model_name="gpt-3.5-turbo",
+    temperature=0.3,
+    max_tokens=MAX_TOKENS
+)
 
 def generate_reply(context: dict) -> str:
     """
-    Central AI stub. In production: integrate LangChain/OpenAI here.
+    RAG generation:
+    - context: {user_id, message, qr_context, language, conversation_history=[]}
+    - Returns localized reply using retrieved docs
     """
-    try:
-        message = context.get("message", "").lower()
-        qr_context = context.get("qr_context")
-        language = context.get("language", "en")
+    user_msg = context.get("message", "")
+    lang = context.get("language", "en")
+    conversation_history = context.get("conversation_history", [])
 
-        # Handle QR codes
-        if qr_context:
-            product_info = get_content_by_key(qr_context)
-            if product_info:
-                return f"Thanks for scanning QR for {qr_context}! {product_info}"
-            return f"Thanks for scanning QR for {qr_context}! How can we help you today?"
+    # Retrieve top-k relevant docs
+    retrieved_docs: list[Document] = vectorstore.similarity_search(user_msg, k=TOP_K)
+    snippets = "\n".join([doc.page_content for doc in retrieved_docs])
 
-        # Simple intents
-        if "hello" in message or "hi" in message:
-            return "Hello! How can I help you today?"
-        if "help" in message:
-            return "I can help with product info, order status, or support questions."
-        if "bye" in message or "goodbye" in message:
-            return "Thank you for chatting with us. Have a great day!"
+    # Build prompt
+    prompt = PROMPT_TEMPLATES.get(lang, PROMPT_TEMPLATES["en"]).format(
+        user_message=user_msg,
+        retrieved_docs=snippets
+    )
 
-        return "I'm here to help. Could you tell me more about what you need?"
-    except Exception as e:
-        logger.error(f"AI Engine error: {e}")
-        return "I’m experiencing technical issues. Please try again later."
+    # Optionally append conversation history for sliding window context
+    if conversation_history:
+        history_text = "\n".join(
+            [f"User: {h['user']}\nAssistant: {h['assistant']}" for h in conversation_history]
+        )
+        prompt = history_text + "\n" + prompt
+
+    # Generate reply
+    response = llm.predict(prompt)
+    return response

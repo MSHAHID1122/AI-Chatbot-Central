@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Chatbot Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 600px;
+            margin: 50px auto;
+            background: #f7f7f7;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+        }
+        h1 { text-align: center; }
+        #chat-box {
+            border: 1px solid #ccc;
+            padding: 10px;
+            height: 300px;
+            overflow-y: auto;
+            background: #fff;
+            margin-bottom: 10px;
+        }
+        .message { margin: 5px 0; }
+        .user { color: blue; }
+        .bot { color: green; }
+        input[type=text] {
+            width: 80%;
+            padding: 8px;
+            border-radius: 5px;
+            border: 1px solid #ccc;
+        }
+        button {
+            padding: 8px 12px;
+            border: none;
+            border-radius: 5px;
+            background: #28a745;
+            color: #fff;
+            cursor: pointer;
+        }
+        button:hover { background: #218838; }
+    </style>
+</head>
+<body>
+
+<h1>Web Chat Test</h1>
+
+<div id="chat-box"></div>
+
+<input type="text" id="message-input" placeholder="Type a message..." />
+<button onclick="sendMessage()">Send</button>
+
+<script>
+const API_KEY = "dev-secret"; // same as in your .env for testing
+const chatBox = document.getElementById("chat-box");
+
+function appendMessage(sender, text) {
+    const msg = document.createElement("div");
+    msg.classList.add("message");
+    msg.classList.add(sender);
+    msg.innerText = `${sender.toUpperCase()}: ${text}`;
+    chatBox.appendChild(msg);
+    chatBox.scrollTop = chatBox.scrollHeight;
+}
+
+async function sendMessage() {
+    const input = document.getElementById("message-input");
+    const message = input.value.trim();
+    if (!message) return;
+
+    appendMessage("user", message);
+    input.value = "";
+
+    try {
+        const res = await fetch("/api/chat", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "x-api-key": API_KEY
+            },
+            body: JSON.stringify({ message: message, user_id: "test-user" })
+        });
+
+        const data = await res.json();
+        if (data.reply) {
+            appendMessage("bot", data.reply);
+        } else {
+            appendMessage("bot", "Error: no reply received");
+        }
+    } catch (err) {
+        appendMessage("bot", "Error: " + err.message);
+    }
+}
+</script>
+
+</body>
+</html>

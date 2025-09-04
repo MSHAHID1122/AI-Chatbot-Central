@@ -1,7 +1,9 @@
 venv/
-chatbot-backend/__pycache__/
 *.py[cod]
 *.pyo
 *.pyd
 .Python
 db.sqlite3
+chatbot-backend/.env
+chatbot-backend/*.env
+chatbot-backend/__pycache__/
