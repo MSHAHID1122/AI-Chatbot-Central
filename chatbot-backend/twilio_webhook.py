@@ -1,12 +1,9 @@
 import logging
-import hashlib
-import time
 from flask import Flask, request, Response, jsonify
 from twilio.twiml.messaging_response import MessagingResponse
 from twilio.request_validator import RequestValidator
 from config import TWILIO_AUTH_TOKEN
 from compliance import is_replay, record_event
-from crm import crm_update_profile, crm_track_event  # ← ADD THIS
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -40,51 +37,17 @@ def twilio_whatsapp_webhook():
     # --- Record event for audit/compliance ---
     record_event(from_number, "inbound", {"body": body, "media": num_media})
 
-    # --- CRM INTEGRATION (YOUR FRIEND'S SUGGESTION) ---
-    try:
-        # Update user profile in CRM (CleverTap/Braze)
-        crm_update_profile(
-            phone=from_number, 
-            opt_in=True, 
-            last_interaction="whatsapp_message"
-        )
-        
-        # Track this event in CRM
-        crm_track_event(
-            phone=from_number,
-            event_name="whatsapp_message_received",
-            evt_props={
-                "body": body,
-                "media_count": num_media,
-                "message_sid": message_sid,
-                "direction": "inbound"
-            }
-        )
-        logger.info(f"CRM updated for {from_number}")
-    except Exception as e:
-        logger.error(f"CRM update failed: {e}")
-        # DON'T fail the webhook if CRM has issues!
-        # WhatsApp still needs a response
-
     # --- Build TwiML response ---
     resp = MessagingResponse()
+
     if body.lower().startswith("qr:"):
+        # Example: "qr: product123"
         item = body.split(":", 1)[1].strip()
-        resp.message(f"Thanks for scanning QR for {item}! 🎉 We'll send you more details soon.")
-        
-        # 🎯 ALSO track QR-specific event in CRM!
-        try:
-            crm_track_event(
-                phone=from_number,
-                event_name="qr_message_received",
-                evt_props={
-                    "qr_content": item,
-                    "full_body": body
-                }
-            )
-        except Exception as e:
-            logger.error(f"QR CRM tracking failed: {e}")
-            
+        resp.message(
+            f"Thanks for scanning QR for {item}! 🎉 We'll send you more details soon."
+        )
+        logger.info(f"QR message received from {from_number} → {item}")
+
     else:
         resp.message("✅ Message received. We'll follow up shortly.")
 

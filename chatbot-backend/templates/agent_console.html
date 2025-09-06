@@ -1,0 +1,126 @@
+<!-- templates/agent_console.html -->
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>Agent Console (Minimal)</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 16px; }
+    #ticket-info { border: 1px solid #ddd; padding: 12px; margin-bottom: 8px; }
+    #messages { height: 300px; overflow-y: auto; border: 1px solid #ccc; padding: 8px; background: #fafafa; }
+    .msg-user { color: #0b5; margin: 6px 0; }
+    .msg-agent { color: #06c; margin: 6px 0; }
+    .controls { margin-top: 8px; }
+    button { padding: 8px 10px; margin-right: 6px; }
+  </style>
+</head>
+<body>
+  <h2>Agent Console (Demo)</h2>
+  <div>
+    Ticket ID: <input id="ticket-id" type="number" value="1"/>
+    <button onclick="loadTicket()">Load</button>
+  </div>
+
+  <div id="ticket-info">
+    <strong>Product Tag:</strong> <span id="product-tag">-</span><br/>
+    <strong>CRM ID:</strong> <span id="crm-id">-</span>
+    <div class="controls">
+      <button onclick="claimTicket()">Claim</button>
+      <button onclick="transferTicket()">Escalate</button>
+      <button onclick="closeTicket()">Close</button>
+    </div>
+  </div>
+
+  <div id="messages"></div>
+
+  <div style="margin-top:8px;">
+    <input id="note-text" type="text" placeholder="Internal note..." style="width:60%"/>
+    <button onclick="appendNote()">Add Note</button>
+
+    <div style="margin-top:8px;">
+      Quick replies:
+      <button onclick="sendQuick('We will look into this and reply shortly.')">Acknowledge</button>
+      <button onclick="sendQuick('Can you share order id?')">Ask order id</button>
+    </div>
+  </div>
+
+<script>
+async function api(url, method='GET', body=null){
+  const opts = { method, headers: {'Content-Type': 'application/json'} };
+  if (body) opts.body = JSON.stringify(body);
+  const res = await fetch(url, opts);
+  if (!res.ok) {
+    const txt = await res.text();
+    alert('API error: ' + res.status + ' ' + txt);
+    throw new Error(txt);
+  }
+  return res.json();
+}
+
+async function loadTicket(){
+  const id = document.getElementById('ticket-id').value;
+  const msgs = await api(`/tickets/${id}/messages`);
+  const container = document.getElementById('messages');
+  container.innerHTML = '';
+  // messages are returned newest-first, reverse to show oldest->newest
+  for (const m of msgs.messages.slice().reverse()){
+    const el = document.createElement('div');
+    el.className = (m.sender && m.sender.startsWith('agent')) ? 'msg-agent' : 'msg-user';
+    el.textContent = `[${m.created_at || ''}] ${m.sender}: ${m.text}`;
+    container.appendChild(el);
+  }
+  const first = msgs.messages[0];
+  if (!first) {
+    document.getElementById('product-tag').innerText = '-';
+    document.getElementById('crm-id').innerText = '-';
+    return;
+  }
+  const md = first.metadata || {};
+  document.getElementById('product-tag').innerText = md.product_tag || '-';
+  document.getElementById('crm-id').innerText = md.crm_id || '-';
+}
+
+async function claimTicket(){
+  const id = document.getElementById('ticket-id').value;
+  const agent_id = prompt('Enter your agent id', 'agent-1');
+  if (!agent_id) return;
+  await api(`/tickets/${id}/claim`, 'POST', { agent_id, agent_name: agent_id });
+  alert('Ticket claimed');
+  loadTicket();
+}
+
+async function appendNote(){
+  const id = document.getElementById('ticket-id').value;
+  const note = document.getElementById('note-text').value;
+  if (!note) return alert('Note required');
+  const agent_id = 'agent-1';
+  await api(`/tickets/${id}/notes`, 'POST', { agent_id, note });
+  alert('Note added');
+  document.getElementById('note-text').value = '';
+  loadTicket();
+}
+
+async function transferTicket(){
+  const id = document.getElementById('ticket-id').value;
+  const agent_id = 'agent-1';
+  const team = prompt('Target team (e.g., Tier2)', 'Tier2');
+  if (!team) return;
+  await api(`/tickets/${id}/transfer`, 'POST', { agent_id, target_team: team, reason: 'Escalation requested' });
+  alert('Transferred');
+  loadTicket();
+}
+
+async function closeTicket(){
+  const id = document.getElementById('ticket-id').value;
+  await api(`/tickets/${id}/close`, 'POST', {});
+  alert('Closed');
+  loadTicket();
+}
+
+function sendQuick(text){
+  const id = document.getElementById('ticket-id').value;
+  api(`/tickets/${id}/notes`, 'POST', { agent_id: 'agent-1', note: text }).then(()=>loadTicket());
+}
+</script>
+</body>
+</html>

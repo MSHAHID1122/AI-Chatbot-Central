@@ -9,13 +9,15 @@ from twilio.request_validator import RequestValidator
 # Import your existing modules
 from ai_engine import generate_reply
 import twilio_send
-from crm import crm_track_event, crm_update_profile
 from utils import detect_language
 from config import PORT, DEBUG_MODE, TWILIO_AUTH_TOKEN
 
 # QR code utilities
 from qr_utils import load_mapping, save_mapping, parse_prefill_text
 from qr_utils import MAPPING_FILE  # from env
+
+# Support tickets blueprint ← ADDED
+from services.support_tickets import tickets_bp  # ← ADDED
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -37,6 +39,11 @@ def _save_scans(scans):
 
 app = Flask(__name__)
 validator = RequestValidator(TWILIO_AUTH_TOKEN)
+
+# -----------------------
+# Register Support Tickets Blueprint ← ADDED
+# -----------------------
+app.register_blueprint(tickets_bp)  # ← ADDED
 
 # -----------------------
 # Home Page
@@ -145,11 +152,33 @@ def twilio_whatsapp_webhook():
     })
     _save_scans(scans)
 
-    # Build response based on message content
+    # Build response based on message content ← MODIFIED SECTION
     if body.lower().startswith("qr:"):
         # Handle QR code messages
         item = body.split(":", 1)[1].strip()
         response_text = f"Thanks for scanning QR for {item}! 🎉 We'll send you more details soon."
+    elif "help" in body.lower() or "support" in body.lower() or "problem" in body.lower():
+        # Handle support requests ← ADDED
+        try:
+            from services.support_tickets import route_support_ticket
+            result = route_support_ticket(
+                user={
+                    "phone": from_number,
+                    "display_name": f"WhatsApp User {from_number}",
+                    "crm_id": matched_short
+                },
+                message=body,
+                metadata={
+                    "channel": "whatsapp",
+                    "product_tag": parsed.get('product_id'),
+                    "category": parsed.get('category'),
+                    "subject": f"WhatsApp Support: {body[:50]}..."
+                }
+            )
+            response_text = f"✅ Support ticket #{result['ticket_id']} created! Our team will contact you shortly."
+        except Exception as e:
+            logger.error(f"Support ticket creation failed: {e}")
+            response_text = "⚠️ We're experiencing technical difficulties. Please try again later."
     else:
         # Handle regular messages with AI engine
         context = {
@@ -191,6 +220,7 @@ def send_via_twilio():
 # -----------------------
 @app.route("/api/chat", methods=["POST"])
 def handle_web_chat():
+    from flask import request
     try:
         data = request.get_json()
         logger.info(f"💬 Incoming web chat message: {data}")
@@ -204,14 +234,6 @@ def handle_web_chat():
         conversation_history = data.get("history", [])
 
         language = detect_language(message_text)
-
-        # CRM tracking
-        crm_track_event(
-            user_id,
-            "web_message_received",
-            {"message": message_text, "session_id": session_id, "channel": "web"},
-        )
-        crm_update_profile(user_id, {"opt_in": True, "channel": "web"})
 
         # Build context for AI engine
         context = {
