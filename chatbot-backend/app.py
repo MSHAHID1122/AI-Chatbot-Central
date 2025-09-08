@@ -9,15 +9,16 @@ from twilio.request_validator import RequestValidator
 # Import your existing modules
 from ai_engine import generate_reply
 import twilio_send
-from utils import detect_language
+# REPLACE the old utils.detect_language with the new i18n version
+from app.i18n import detect_language  # ← CHANGED IMPORT
 from config import PORT, DEBUG_MODE, TWILIO_AUTH_TOKEN
 
 # QR code utilities
 from qr_utils import load_mapping, save_mapping, parse_prefill_text
 from qr_utils import MAPPING_FILE  # from env
 
-# Support tickets blueprint ← ADDED
-from services.support_tickets import tickets_bp  # ← ADDED
+# Support tickets blueprint
+from services.support_tickets import tickets_bp
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -40,10 +41,8 @@ def _save_scans(scans):
 app = Flask(__name__)
 validator = RequestValidator(TWILIO_AUTH_TOKEN)
 
-# -----------------------
-# Register Support Tickets Blueprint ← ADDED
-# -----------------------
-app.register_blueprint(tickets_bp)  # ← ADDED
+# Register Support Tickets Blueprint
+app.register_blueprint(tickets_bp)
 
 # -----------------------
 # Home Page
@@ -152,13 +151,13 @@ def twilio_whatsapp_webhook():
     })
     _save_scans(scans)
 
-    # Build response based on message content ← MODIFIED SECTION
+    # Build response based on message content
     if body.lower().startswith("qr:"):
         # Handle QR code messages
         item = body.split(":", 1)[1].strip()
         response_text = f"Thanks for scanning QR for {item}! 🎉 We'll send you more details soon."
     elif "help" in body.lower() or "support" in body.lower() or "problem" in body.lower():
-        # Handle support requests ← ADDED
+        # Handle support requests
         try:
             from services.support_tickets import route_support_ticket
             result = route_support_ticket(
@@ -180,14 +179,21 @@ def twilio_whatsapp_webhook():
             logger.error(f"Support ticket creation failed: {e}")
             response_text = "⚠️ We're experiencing technical difficulties. Please try again later."
     else:
-        # Handle regular messages with AI engine
+        # Handle regular messages with AI engine ← UPDATED SECTION
+        # Use the NEW detect_language function with proper result handling
+        detection_result = detect_language(body)  # ← CHANGED
+        lang = detection_result.get('lang', 'en')  # ← CHANGED
+        
         context = {
             "channel": "whatsapp",
             "user_id": from_number,
             "session_id": message_sid,
             "message": body,
-            "language": detect_language(body),
+            "language": lang,  # ← CHANGED: Now passing the detected language string
             "conversation_history": [],
+            # Add any other context your AI engine might need
+            "user_profile": {},  # You might want to populate this
+            "product_context": {}  # You might want to populate this
         }
         response_text = generate_reply(context)
 
@@ -216,47 +222,78 @@ def send_via_twilio():
     return jsonify({"status": "sent"}), 200
 
 # -----------------------
-# Website Chat Endpoint
+# Website Chat Endpoint ← UPDATED SECTION
 # -----------------------
 @app.route("/api/chat", methods=["POST"])
 def handle_web_chat():
-    from flask import request
     try:
-        data = request.get_json()
+        # ✅ 1. HANDLE BOTH JSON AND FORM-DATA (FOR FILE UPLOADS)
+        if request.is_json:
+            data = request.get_json()
+        else:
+            # This handles form-data requests (e.g., when a file is uploaded)
+            data = request.form
+            # If a file was sent, get it
+            uploaded_file = request.files.get('file')
+
         logger.info(f"💬 Incoming web chat message: {data}")
 
-        if not data or "message" not in data:
-            return jsonify({"error": "Message is required"}), 400
+        # ✅ 2. EXTRACT DATA THE WIDGET SENDS (session_id, message, language, intent)
+        message_text = data.get("message", "")
+        session_id = data.get("session_id", "anon-session")
+        language = data.get("language", "en")  # Widget sends this
+        intent = data.get("intent")            # Widget might send this from quick buttons
 
-        message_text = data.get("message")
-        session_id = data.get("session_id") or "anon-session"
-        user_id = data.get("user_id") or session_id
-        conversation_history = data.get("history", [])
-
-        language = detect_language(message_text)
+        # ✅ 3. USE THE LANGUAGE FROM THE WIDGET AS THE CLIENT HINT
+        detection_result = detect_language(message_text, client_hint=language) # Use 'language' from widget
+        lang = detection_result.get('lang', language) # Fallback to widget's language if detection fails
 
         # Build context for AI engine
         context = {
             "channel": "web",
-            "user_id": user_id,
+            "user_id": session_id,  # Using session_id as user_id for simplicity with widget
             "session_id": session_id,
             "message": message_text,
-            "language": language,
-            "conversation_history": conversation_history,
+            "language": lang,
+            "conversation_history": [], # Widget handles history locally, so this can be empty
+            "intent": intent, # Pass the intent to your AI engine
+            # "user_profile": {},  # Remove or keep if your AI uses it
+            # "product_context": {} # Remove or keep if your AI uses it
         }
 
+        # ✅ 4. GENERATE THE REPLY USING YOUR AI ENGINE
         reply = generate_reply(context)
 
+        # ✅ 5. RETURN THE SIMPLE JSON RESPONSE THE WIDGET EXPECTS
         return jsonify({
-            "status": "success",
-            "reply": reply,
-            "channel": "web",
-            "session_id": session_id
+            "reply": reply,          # The widget looks for this key
+            "session_id": session_id, # The widget looks for this key
+            # You can keep these for debugging, the widget will ignore them
+            "detected_language": lang,
+            "is_rtl": detection_result.get('is_rtl', False)
         }), 200
 
     except Exception as e:
         logger.exception("❌ Error processing web chat")
         return jsonify({"error": "Internal server error"}), 500
+# -----------------------
+# Optional: Language Detection Endpoint for Frontend
+# -----------------------
+@app.route("/api/detect-language", methods=["POST"])
+def detect_language_endpoint():
+    """Endpoint for frontend to detect language in real-time."""
+    try:
+        data = request.get_json()
+        text = data.get("text", "")
+        client_hint = data.get("hint")  # Get UI language hint from frontend
+        
+        detection_result = detect_language(text, client_hint=client_hint)
+        
+        return jsonify(detection_result), 200
+        
+    except Exception as e:
+        logger.error(f"Language detection error: {e}")
+        return jsonify({"error": "Detection failed"}), 500
 
 # -----------------------
 # Health Check

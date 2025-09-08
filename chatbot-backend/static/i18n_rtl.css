@@ -1,0 +1,7 @@
+/* static/i18n_rtl.css - merge into your widget CSS */
+.chat-widget.rtl { direction: rtl; unicode-bidi: embed; }
+.rtl .msg.user { margin-right: auto; text-align: right; }
+.rtl .msg.bot  { text-align: right; }
+.rtl .input-row { direction: rtl; }
+.rtl .icon.flip-rtl { transform: scaleX(-1); }
+.rtl .msg { white-space: pre-wrap; }

@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Embed Chat Widget</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <!-- Optional: server may inject a short-lived token here -->
+  <meta name="chat-widget-token" content="">
+
+  <style>
+    :root{
+      --bg:#fff; --panel-bg:#f8fafc; --accent:#2563eb; --muted:#6b7280;
+      --user-bg:#dbeafe; --bot-bg:#eef2ff; --radius:12px; --max-width:380px;
+      --font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", Arial;
+    }
+    .chat-widget{ width:100%; max-width:var(--max-width); font-family:var(--font-family);
+      background:var(--panel-bg); border-radius:var(--radius); box-shadow:0 10px 30px rgba(2,6,23,0.08);
+      overflow:hidden; display:flex; flex-direction:column;
+    }
+    .chat-widget.rtl{ direction:rtl; unicode-bidi:embed; }
+    .chat-header{ background:linear-gradient(90deg,var(--accent),#4f46e5); color:#fff; padding:12px; display:flex; gap:8px; align-items:center; justify-content:space-between; }
+    .chat-header h3{ margin:0; font-size:16px; }
+    .chat-body{ padding:10px; height:320px; overflow-y:auto; background:var(--bg); }
+    .messages{ display:flex; flex-direction:column; gap:8px; }
+    .msg{ max-width:80%; padding:8px 10px; border-radius:10px; word-break:break-word; white-space:pre-wrap; }
+    .msg.user{ align-self:flex-end; background:var(--user-bg); color:#052e65; }
+    .rtl .msg.user{ align-self:flex-start; }
+    .msg.bot{ align-self:flex-start; background:var(--bot-bg); color:#0b2545; }
+    .rtl .msg.bot{ align-self:flex-end; }
+    .meta{ font-size:12px; color:var(--muted); margin-top:4px; }
+    .chat-footer{ padding:8px; border-top:1px solid rgba(0,0,0,0.04); display:flex; gap:8px; align-items:center; }
+    .input{ flex:1; display:flex; gap:8px; align-items:center; }
+    .input input[type="text"]{ width:100%; padding:8px 10px; border-radius:8px; border:1px solid #e6e9ef; outline:none; }
+    .input input[type="file"]{ display:none; }
+    .send-btn, .quick-btn{ background:var(--accent); color:white; border:none; padding:8px 10px; border-radius:8px; cursor:pointer; }
+    .quick-row{ display:flex; gap:8px; padding:8px; flex-wrap:wrap; }
+    .quick-btn{ background:#eef2ff; color:#1e3a8a; border:1px solid #dbeafe; padding:6px 8px; cursor:pointer; border-radius:6px; }
+    .lang-select{ margin-left:8px; }
+    .small{ font-size:12px; color:var(--muted); }
+    .send-btn:focus, .quick-btn:focus, .input input:focus{ outline:3px solid rgba(37,99,235,0.18); outline-offset:2px; }
+    @media (max-width:420px){ .chat-widget{ max-width:100%; border-radius:0; } .chat-body{ height:280px; } }
+  </style>
+</head>
+<body>
+  <div id="my-chat-widget" class="chat-widget" aria-label="Chat widget">
+    <div class="chat-header" role="banner">
+      <h3 id="widget-title">Support Chat</h3>
+      <div>
+        <label for="lang" class="small" style="margin-right:8px">Language</label>
+        <select id="lang" aria-label="Language selector" class="lang-select">
+          <option value="en">English</option>
+          <option value="ar">العربية</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="chat-body" role="region" aria-live="polite" aria-atomic="false">
+      <div id="messages" class="messages" role="log" aria-live="polite"></div>
+    </div>
+
+    <div class="quick-row" aria-hidden="false">
+      <button class="quick-btn" data-intent="inspiration">Inspiration</button>
+      <button class="quick-btn" data-intent="faq">FAQ</button>
+      <button class="quick-btn" data-intent="complaint">Complaint</button>
+    </div>
+
+    <div class="chat-footer" role="form" aria-label="Send a message">
+      <div class="input">
+        <input id="message-input" type="text" placeholder="Type a message..." aria-label="Message input" />
+        <label for="file-input" title="Attach file" style="cursor:pointer; margin-left:6px;">📎</label>
+        <input id="file-input" type="file" accept="image/*,application/pdf" aria-label="Attach file" />
+      </div>
+      <button id="send-btn" class="send-btn" aria-label="Send">Send</button>
+    </div>
+  </div>
+
+  <script src="widget.js"></script>
+</body>
+</html>
