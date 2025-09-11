@@ -6,20 +6,23 @@ import qrcode
 import requests
 import secrets
 from urllib.parse import quote_plus, urlencode
-from dotenv import load_dotenv
 
-load_dotenv()
-
-BITLY_TOKEN = os.getenv("BITLY_TOKEN")
-SHORT_BASE = os.getenv("SHORT_BASE", "https://go.example.com")
-MAPPING_FILE = os.getenv("MAPPING_FILE", "data/short_mapping.json")
+# Import from centralized config instead of loading .env directly
+from config import (
+    BITLY_TOKEN,
+    SHORT_BASE,
+    MAPPING_FILE,
+    BASE_DIR
+)
 
 def _ensure_mapping_file():
-    d = os.path.dirname(MAPPING_FILE)
-    if d and not os.path.exists(d):
-        os.makedirs(d, exist_ok=True)
-    if not os.path.exists(MAPPING_FILE):
-        json.dump({}, open(MAPPING_FILE, "w"))
+    # Use MAPPING_FILE from config (already a Path object)
+    mapping_path = MAPPING_FILE
+    if not mapping_path.parent.exists():
+        mapping_path.parent.mkdir(parents=True, exist_ok=True)
+    if not mapping_path.exists():
+        with open(mapping_path, "w") as f:
+            json.dump({}, f)
 
 def load_mapping():
     _ensure_mapping_file()

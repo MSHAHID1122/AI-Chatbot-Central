@@ -7,3 +7,5 @@ db.sqlite3
 chatbot-backend/.env
 chatbot-backend/*.env
 chatbot-backend/__pycache__/
+chatbot-backend/data/
+chatbot-backend/database/

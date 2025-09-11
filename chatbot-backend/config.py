@@ -65,10 +65,9 @@ TWILIO_WHATSAPP_FROM = _get_str("TWILIO_WHATSAPP_FROM", "whatsapp:+14155238886")
 # -------------------------
 OPENAI_API_KEY = _get_str("OPENAI_API_KEY", None)
 if not OPENAI_API_KEY:
-    # Fail fast on missing critical key (optional if you want to allow some processes without OpenAI)
     raise ValueError("Missing OPENAI_API_KEY in .env — set your OpenAI key or adjust config.py behavior.")
 
-EMBEDDING_MODEL = _get_str("EMBEDDING_MODEL", _get_str("EMBEDDING_MODEL", "text-embedding-3-small"))
+EMBEDDING_MODEL = _get_str("EMBEDDING_MODEL", "text-embedding-3-small")
 BATCH_SIZE = _get_int("BATCH_SIZE", 8)
 TOP_K = _get_int("TOP_K", 3)
 MAX_TOKENS = _get_int("MAX_TOKENS", 512)
@@ -77,9 +76,7 @@ MAX_TOKENS = _get_int("MAX_TOKENS", 512)
 # Postgres / SQLAlchemy
 # -------------------------
 DATABASE_URL = _get_str("DATABASE_URL", "")
-# Provide a safe default fallback to local file if DATABASE_URL not set (useful for dev).
 if not DATABASE_URL:
-    # Use a local sqlite file as fallback (SQLAlchemy-style URL)
     DATABASE_URL = f"sqlite:///{str(BASE_DIR / 'data' / 'local_app.db')}"
 DB_POOL_SIZE = _get_int("DB_POOL_SIZE", 10)
 DB_MAX_OVERFLOW = _get_int("DB_MAX_OVERFLOW", 20)
@@ -87,7 +84,6 @@ DB_MAX_OVERFLOW = _get_int("DB_MAX_OVERFLOW", 20)
 # -------------------------
 # Chroma (vector DB)
 # -------------------------
-# Persist dir should be inside project data folder by default
 DEFAULT_CHROMA_DIR = BASE_DIR / "data" / "chroma_db"
 CHROMA_PERSIST_DIR = Path(_get_str("CHROMA_PERSIST_DIR", str(DEFAULT_CHROMA_DIR))).resolve()
 CHROMA_COLLECTION_NAME = _get_str("CHROMA_COLLECTION_NAME", "content_hub")
@@ -98,6 +94,13 @@ CHROMA_COLLECTION_NAME = _get_str("CHROMA_COLLECTION_NAME", "content_hub")
 DEFAULT_CONTENT_DIR = BASE_DIR / "content_ingest" / "datasets"
 DATA_DIR = Path(_get_str("DATA_DIR", str(DEFAULT_CONTENT_DIR))).resolve()
 STATE_DB = Path(_get_str("STATE_DB", str(BASE_DIR / "content_ingest" / "state.db"))).resolve()
+
+# -------------------------
+# Bitly URL Shortener & QR
+# -------------------------
+BITLY_TOKEN = _get_str("BITLY_TOKEN", None)
+SHORT_BASE = _get_str("SHORT_BASE", "https://go.example.com")
+MAPPING_FILE = Path(_get_str("MAPPING_FILE", str(BASE_DIR / "data" / "short_mapping.json"))).resolve()
 
 # -------------------------
 # Support tickets & local SQLite (fallback)
@@ -131,14 +134,15 @@ def _ensure_dirs():
             STATE_DB.parent.mkdir(parents=True, exist_ok=True)
         if SQLITE_DB.parent:
             SQLITE_DB.parent.mkdir(parents=True, exist_ok=True)
+        if MAPPING_FILE.parent:
+            MAPPING_FILE.parent.mkdir(parents=True, exist_ok=True)
     except Exception:
-        # don't raise on directory creation failure here — let calling code surface if needed
         pass
 
 _ensure_dirs()
 
 # -------------------------
-# Exported list of important config for convenience (optional)
+# Exported list of important config for convenience
 # -------------------------
 __all__ = [
     "BASE_DIR",
@@ -162,6 +166,11 @@ __all__ = [
     "CHROMA_COLLECTION_NAME",
     "DATA_DIR",
     "STATE_DB",
+    # New QR/Bitly variables:
+    "BITLY_TOKEN",
+    "SHORT_BASE",
+    "MAPPING_FILE",
+    # Continue with existing:
     "TICKET_PROVIDER",
     "ZENDESK_SUBDOMAIN",
     "ZENDESK_EMAIL",
