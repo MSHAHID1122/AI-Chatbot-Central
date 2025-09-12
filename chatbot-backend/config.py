@@ -73,14 +73,13 @@ TOP_K = _get_int("TOP_K", 3)
 MAX_TOKENS = _get_int("MAX_TOKENS", 512)
 
 # -------------------------
-# Postgres / SQLAlchemy
+# MySql / SQLAlchemy
 # -------------------------
 DATABASE_URL = _get_str("DATABASE_URL", "")
 if not DATABASE_URL:
     DATABASE_URL = f"sqlite:///{str(BASE_DIR / 'data' / 'local_app.db')}"
 DB_POOL_SIZE = _get_int("DB_POOL_SIZE", 10)
 DB_MAX_OVERFLOW = _get_int("DB_MAX_OVERFLOW", 20)
-
 # -------------------------
 # Chroma (vector DB)
 # -------------------------

@@ -1,22 +1,14 @@
-from sqlalchemy import text
-from database.models import Base
-from database.connection import engine   # use the engine directly
+# db/init_db.py
+import logging
+from database import engine, Base
 
-def init():
-    with engine.connect() as conn:
-        # 1. Drop the index explicitly
-        conn.execute(text("DROP INDEX IF EXISTS ix_contacts_phone;"))
+logger = logging.getLogger(__name__)
 
-        # 2. Drop and recreate schema
-        conn.execute(text("DROP SCHEMA public CASCADE;"))
-        conn.execute(text("CREATE SCHEMA public;"))
-        conn.commit()
-
-    print("Dropped schema and index, recreated schema.")
-
-    # 3. Recreate all tables
+def create_all():
+    logger.info("Creating database tables...")
     Base.metadata.create_all(bind=engine)
-    print("Tables created successfully.")
+    logger.info("Done.")
 
 if __name__ == "__main__":
-    init()
+    logging.basicConfig(level=logging.INFO)
+    create_all()
