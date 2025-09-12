@@ -1,43 +1,20 @@
-# helpers: create_short_link, generate_qr_image, parse_prefill_text, session token
-import os
-import json
+# app/qr_utils.py
 import uuid
 import qrcode
 import requests
 import secrets
-from urllib.parse import quote_plus, urlencode
+from sqlalchemy.orm import Session
 
-# Import from centralized config instead of loading .env directly
-from config import (
-    BITLY_TOKEN,
-    SHORT_BASE,
-    MAPPING_FILE,
-    BASE_DIR
-)
+# Import from centralized config
+from config import BITLY_TOKEN, SHORT_BASE
+from db import SessionLocal
+from db.models import QRLink
 
-def _ensure_mapping_file():
-    # Use MAPPING_FILE from config (already a Path object)
-    mapping_path = MAPPING_FILE
-    if not mapping_path.parent.exists():
-        mapping_path.parent.mkdir(parents=True, exist_ok=True)
-    if not mapping_path.exists():
-        with open(mapping_path, "w") as f:
-            json.dump({}, f)
 
-def load_mapping():
-    _ensure_mapping_file()
-    with open(MAPPING_FILE, "r") as f:
-        return json.load(f)
-
-def save_mapping(mapping):
-    _ensure_mapping_file()
-    with open(MAPPING_FILE, "w") as f:
-        json.dump(mapping, f, indent=2)
-
-def create_short_link(long_url):
+def create_short_link(long_url: str) -> str:
     """
     Create a short URL via Bitly if BITLY_TOKEN supplied,
-    otherwise generate a short id and store mapping locally.
+    otherwise generate and store mapping in the qr_links table.
     Returns the full short URL.
     """
     if BITLY_TOKEN:
@@ -49,20 +26,42 @@ def create_short_link(long_url):
         r = requests.post("https://api-ssl.bitly.com/v4/shorten", headers=headers, json=data)
         r.raise_for_status()
         return r.json()["link"]
-    # fallback: local mapping
-    mapping = load_mapping()
-    short_id = uuid.uuid4().hex[:8]
-    short_url = f"{SHORT_BASE}/{short_id}"
-    mapping[short_id] = {"long_url": long_url}
-    save_mapping(mapping)
-    return short_url
 
-def generate_qr_image(url, filename="qr.png"):
+    # fallback: save in DB
+    db: Session = SessionLocal()
+    try:
+        short_id = uuid.uuid4().hex[:8]
+        short_url = f"{SHORT_BASE}/{short_id}"
+
+        qr_link = QRLink(short_code=short_id, target_url=long_url)
+        db.add(qr_link)
+        db.commit()
+
+        return short_url
+    finally:
+        db.close()
+
+
+def get_long_url(short_code: str) -> str | None:
+    """
+    Look up the original long URL from a short_code in DB.
+    """
+    db: Session = SessionLocal()
+    try:
+        qr_link = db.query(QRLink).filter_by(short_code=short_code).first()
+        return qr_link.target_url if qr_link else None
+    finally:
+        db.close()
+
+
+def generate_qr_image(url: str, filename: str = "qr.png") -> str:
     img = qrcode.make(url)
     img.save(filename)
     return filename
 
-def make_prefill(category=None, product_id=None, utm_source="qr", utm_medium=None, session=None, extra=None):
+
+def make_prefill(category=None, product_id=None, utm_source="qr",
+                 utm_medium=None, session=None, extra=None) -> str:
     """
     Build the prefill text that goes into wa.me?text=...
     Example: qr:category=tshirt|product_id=TSHIRT-123|utm_source=qr|session=abc123
@@ -81,7 +80,8 @@ def make_prefill(category=None, product_id=None, utm_source="qr", utm_medium=Non
         parts.append(extra)
     return "qr:" + "|".join(parts)
 
-def parse_prefill_text(text):
+
+def parse_prefill_text(text: str) -> dict:
     """
     Parse the prefill text sent by the user when they tap send.
     Returns dict of key->value for parts after 'qr:'.
@@ -98,6 +98,7 @@ def parse_prefill_text(text):
             out[k] = unquote_plus(v)
     return out
 
-def generate_session_token():
+
+def generate_session_token() -> str:
     # cryptographically secure short token
     return secrets.token_urlsafe(8)

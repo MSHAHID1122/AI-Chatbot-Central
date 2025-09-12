@@ -6,7 +6,7 @@ from typing import Dict, Tuple, Optional
 try:
     from langdetect import detect_langs
     LANGDETECT_AVAILABLE = True
-except Exception:
+except Exception:                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 
     LANGDETECT_AVAILABLE = False
 
 # Arabic unicode ranges (includes presentation forms)

@@ -1,306 +1,383 @@
+# app.py
 import os
-import json
 import datetime
 import logging
-from flask import Flask, request, redirect, jsonify, render_template
 from urllib.parse import quote_plus
-from twilio.request_validator import RequestValidator
-
-# Import your existing modules
-from ai_engine import generate_reply
 import twilio_send
-# REPLACE the old utils.detect_language with the new i18n version
-from app.i18n import detect_language  # ← CHANGED IMPORT
+from flask import (
+    Flask,
+    request,
+    redirect,
+    jsonify,
+    render_template,
+    Response,
+)
+from twilio.request_validator import RequestValidator
+from twilio.twiml.messaging_response import MessagingResponse
+
+# local modules - adjust import paths to match your project layout if needed
 from config import PORT, DEBUG_MODE, TWILIO_AUTH_TOKEN
+from ai_engine import generate_reply
+from app.i18n import detect_language   # your language detection helper
+from qr_utils import parse_prefill_text  # keep load_mapping/save_mapping only if still used
+from services.support_tickets import tickets_bp, route_support_ticket
 
-# QR code utilities
-from qr_utils import load_mapping, save_mapping, parse_prefill_text
-from qr_utils import MAPPING_FILE  # from env
+# Database session + models
+from database.engine import get_db_session, engine
+from database.models import (
+    Base,
+    Contact,
+    MessagingEvent,
+    QRLink,
+    QRScan,
+    Ticket,
+    TicketMessage,
+)
 
-# Support tickets blueprint
-from services.support_tickets import tickets_bp
-
-# Setup logging
+# ------------ Logging ------------
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("app")
 
-# Data directory for storing scans
-DATA_DIR = "data"
-SCANS_FILE = os.path.join(DATA_DIR, "scans.json")
-os.makedirs(DATA_DIR, exist_ok=True)
-
-# Simple file helpers (demo only)
-def _load_scans():
-    if not os.path.exists(SCANS_FILE):
-        json.dump([], open(SCANS_FILE, "w"))
-    return json.load(open(SCANS_FILE))
-
-def _save_scans(scans):
-    json.dump(scans, open(SCANS_FILE, "w"), indent=2)
-
+# ------------ Flask app ------------
 app = Flask(__name__)
-validator = RequestValidator(TWILIO_AUTH_TOKEN)
 
-# Register Support Tickets Blueprint
+# Register blueprints (support tickets)
 app.register_blueprint(tickets_bp)
 
+# Twilio request validator (optional; only if env var present)
+validator = None
+if TWILIO_AUTH_TOKEN:
+    try:
+        validator = RequestValidator(TWILIO_AUTH_TOKEN)
+    except Exception as e:
+        logger.warning("Failed to initialize Twilio RequestValidator: %s", e)
+        validator = None
+else:
+    logger.info("TWILIO_AUTH_TOKEN not provided: Twilio signature validation disabled (dev mode).")
+
+# Ensure DB tables exist (create if missing)
+try:
+    Base.metadata.create_all(bind=engine)
+    logger.info("Ensured DB tables are created.")
+except Exception as e:
+    logger.exception("Failed to create DB tables (you may need to run migrations separately): %s", e)
+
+
 # -----------------------
-# Home Page
+# Helpers
+# -----------------------
+def _make_twiml_message(text: str) -> Response:
+    resp = MessagingResponse()
+    resp.message(text)
+    return Response(str(resp), mimetype="application/xml")
+
+
+# -----------------------
+# Home / index
 # -----------------------
 @app.route("/")
 def index():
     return render_template("index.html")
 
+
 # -----------------------
-# QR Code Redirect Endpoint
+# QR redirect endpoint
+# Example: https://yourdomain.com/<short_id>
 # -----------------------
 @app.route("/<short_id>", methods=["GET"])
 def redirect_short(short_id):
-    mapping = load_mapping()
-    entry = mapping.get(short_id)
-    if not entry:
-        return "Not found", 404
-
-    # Log scan
-    scans = _load_scans()
-    scan_record = {
-        "short_id": short_id,
-        "ip": request.remote_addr,
-        "ua": request.headers.get("User-Agent"),
-        "ts": datetime.datetime.utcnow().isoformat(),
-        "matched": False
-    }
-    scans.append(scan_record)
-    _save_scans(scans)
-
-    # Detect mobile user agents roughly
+    """
+    Redirect users to wa.me or web.whatsapp depending on UA, log a QRScan row.
+    """
     ua = (request.headers.get("User-Agent") or "").lower()
     is_mobile = any(x in ua for x in ("iphone", "android", "ipad", "mobile"))
 
-    # Build wa.me and web.whatsapp URLs
-    phone = entry.get("phone")
-    prefill = entry.get("prefill")
-    wa_url = f"https://wa.me/{phone}?text={quote_plus(prefill)}"
-    web_url = f"https://web.whatsapp.com/send?phone={phone}&text={quote_plus(prefill)}"
+    with get_db_session() as db:
+        qr = db.query(QRLink).filter(QRLink.short_id == short_id).first()
+        if not qr:
+            logger.info("QR short_id not found: %s", short_id)
+            return "Not found", 404
 
-    # Redirect based on device
-    if not is_mobile:
-        return redirect(web_url, code=302)
-    return redirect(wa_url, code=302)
+        # Log scan
+        scan = QRScan(
+            qr_link_id=qr.id,
+            session_token=None,
+            ip=request.remote_addr,
+            ua=request.headers.get("User-Agent"),
+            country=None,
+            utm_source=request.args.get("utm_source"),
+            utm_medium=request.args.get("utm_medium"),
+            matched=False,
+            created_at=datetime.datetime.utcnow(),
+        )
+        db.add(scan)
+        db.commit()
+
+        phone = qr.target_phone
+        prefill = qr.prefill_text or ""
+        wa_url = f"https://wa.me/{phone}?text={quote_plus(prefill)}"
+        web_url = f"https://web.whatsapp.com/send?phone={phone}&text={quote_plus(prefill)}"
+
+        logger.info("QR redirect short=%s phone=%s mobile=%s", short_id, phone, is_mobile)
+        return redirect(wa_url if is_mobile else web_url, code=302)
+
 
 # -----------------------
-# Twilio WhatsApp Webhook
+# Twilio WhatsApp webhook
 # -----------------------
 @app.route("/twilio/whatsapp", methods=["POST"])
 def twilio_whatsapp_webhook():
-    # Verify signature
-    signature = request.headers.get("X-Twilio-Signature", "")
-    url = request.url
-    params = request.form.to_dict()
-    if not validator.validate(url, params, signature):
-        return jsonify({"error": "invalid signature"}), 401
+    # Signature validation (if configured)
+    if validator:
+        signature = request.headers.get("X-Twilio-Signature", "")
+        url = request.url
+        params = request.form.to_dict()
+        if not validator.validate(url, params, signature):
+            logger.warning("Invalid Twilio signature for URL=%s", url)
+            return jsonify({"error": "invalid signature"}), 401
 
     from_number = request.form.get("From")
-    body = request.form.get("Body", "")
+    body = request.form.get("Body", "") or ""
     message_sid = request.form.get("MessageSid")
 
-    # Parse prefill text for QR codes
     parsed = parse_prefill_text(body)
-    
-    # Log the incoming message
-    logger.info(f"Inbound from {from_number}: {body}")
 
-    # For tracking: try to find mapping by session token first
-    session = parsed.get("session")
-    product_id = parsed.get("product_id")
-    category = parsed.get("category")
+    logger.info("Inbound Twilio message from=%s sid=%s body=%s", from_number, message_sid, (body or "")[:200])
 
-    mapping = load_mapping()
     matched_short = None
+    # Persist contact + message event + try to match QR scan
+    with get_db_session() as db:
+        # find or create contact
+        contact = None
+        if from_number:
+            contact = db.query(Contact).filter(Contact.phone == from_number).first()
+        if not contact:
+            contact = Contact(phone=from_number, display_name=f"WhatsApp {from_number}")
+            db.add(contact)
+            db.commit()
+            db.refresh(contact)
 
-    # 1) match by session token (recommended)
-    if session:
-        for sid, entry in mapping.items():
-            if entry.get("session") == session:
-                matched_short = sid
-                break
+        # attempt to link by session token (if present in parsed)
+        session_token = parsed.get("session")
+        if session_token:
+            qr = db.query(QRLink).filter(QRLink.session_token == session_token).first()
+            if qr:
+                matched_short = qr.short_id
+                # mark latest unmatched scan for this qr
+                scan = (
+                    db.query(QRScan)
+                    .filter(QRScan.qr_link_id == qr.id, QRScan.matched == False)
+                    .order_by(QRScan.created_at.desc())
+                    .first()
+                )
+                if scan:
+                    scan.matched = True
+                    scan.matched_at = datetime.datetime.utcnow()
+                    scan.matched_contact_id = contact.id
+                    db.add(scan)
 
-    # Log and mark scan matched if found
-    scans = _load_scans()
-    found = False
-    if matched_short:
-        # mark latest unmatched scan for matched_short
-        for s in reversed(scans):
-            if s.get("short_id") == matched_short and not s.get("matched"):
-                s["matched"] = True
-                s["matched_at"] = datetime.datetime.utcnow().isoformat()
-                s["from_number"] = from_number
-                s["parsed"] = parsed
-                found = True
-                break
-        _save_scans(scans)
+        # record messaging event
+        evt = MessagingEvent(
+            contact_id=contact.id,
+            event_type="inbound",
+            payload={
+                "body": body,
+                "parsed": parsed,
+                "short_id": matched_short,
+                "message_sid": message_sid,
+            },
+            created_at=datetime.datetime.utcnow(),
+        )
+        db.add(evt)
+        db.commit()
 
-    # Also append inbound message log
-    scans.append({
-        "short_id": matched_short,
-        "message_sid": message_sid,
-        "from": from_number,
-        "body": body,
-        "parsed": parsed,
-        "ts": datetime.datetime.utcnow().isoformat()
-    })
-    _save_scans(scans)
+    # Build response using logic: qr:, support flow, or AI
+    try:
+        if body.strip().lower().startswith("qr:"):
+            item = body.split(":", 1)[1].strip()
+            reply_text = f"Thanks for scanning QR for {item}! 🎉 We'll send you more details soon."
+        elif any(tok in body.lower() for tok in ("help", "support", "problem", "issue")):
+            # create support ticket
+            # route_support_ticket returns dict with ticket_id, external_id, provider
+            try:
+                ticket_res = route_support_ticket(
+                    user={
+                        "phone": from_number,
+                        "display_name": f"WhatsApp User {from_number}",
+                        "crm_id": matched_short,
+                    },
+                    message=body,
+                    metadata={"channel": "whatsapp", "product_tag": parsed.get("product_id"), "subject": f"WhatsApp Support: {body[:50]}"},
+                )
+                reply_text = f"✅ Support ticket #{ticket_res.get('ticket_id')} created! Our team will contact you shortly."
+            except Exception as e:
+                logger.exception("Support ticket creation failed")
+                reply_text = "⚠️ We're experiencing technical difficulties creating a support ticket. Please try again later."
+        else:
+            # Conversational AI flow
+            detect_result = detect_language(body)
+            lang = detect_result.get("lang", "en")
+            context = {
+                "channel": "whatsapp",
+                "user_id": from_number,
+                "session_id": message_sid,
+                "message": body,
+                "language": lang,
+                "conversation_history": [],
+                "user_profile": {"phone": from_number},
+                "product_context": {"product_id": parsed.get("product_id")},
+            }
+            reply_text = generate_reply(context)
 
-    # Build response based on message content
-    if body.lower().startswith("qr:"):
-        # Handle QR code messages
-        item = body.split(":", 1)[1].strip()
-        response_text = f"Thanks for scanning QR for {item}! 🎉 We'll send you more details soon."
-    elif "help" in body.lower() or "support" in body.lower() or "problem" in body.lower():
-        # Handle support requests
-        try:
-            from services.support_tickets import route_support_ticket
-            result = route_support_ticket(
-                user={
-                    "phone": from_number,
-                    "display_name": f"WhatsApp User {from_number}",
-                    "crm_id": matched_short
-                },
-                message=body,
-                metadata={
-                    "channel": "whatsapp",
-                    "product_tag": parsed.get('product_id'),
-                    "category": parsed.get('category'),
-                    "subject": f"WhatsApp Support: {body[:50]}..."
-                }
-            )
-            response_text = f"✅ Support ticket #{result['ticket_id']} created! Our team will contact you shortly."
-        except Exception as e:
-            logger.error(f"Support ticket creation failed: {e}")
-            response_text = "⚠️ We're experiencing technical difficulties. Please try again later."
-    else:
-        # Handle regular messages with AI engine ← UPDATED SECTION
-        # Use the NEW detect_language function with proper result handling
-        detection_result = detect_language(body)  # ← CHANGED
-        lang = detection_result.get('lang', 'en')  # ← CHANGED
-        
-        context = {
-            "channel": "whatsapp",
-            "user_id": from_number,
-            "session_id": message_sid,
-            "message": body,
-            "language": lang,  # ← CHANGED: Now passing the detected language string
-            "conversation_history": [],
-            # Add any other context your AI engine might need
-            "user_profile": {},  # You might want to populate this
-            "product_context": {}  # You might want to populate this
-        }
-        response_text = generate_reply(context)
+        # return TwiML
+        return _make_twiml_response(reply_text)
+    except Exception as exc:
+        logger.exception("Error handling Twilio webhook: %s", exc)
+        return _make_twiml_response("⚠️ Internal error processing your message. Please try again later."), 500
 
-    # Send response back to Twilio
-    from twilio.twiml.messaging_response import MessagingResponse
+
+def _make_twiml_response(text: str) -> Response:
     resp = MessagingResponse()
-    resp.message(response_text)
-    return str(resp), 200, {'Content-Type': 'application/xml'}
+    resp.message(text)
+    return Response(str(resp), mimetype="application/xml")
+
 
 # -----------------------
-# Send Outbound Message via Twilio
+# Send outbound via Twilio (and log)
 # -----------------------
 @app.route("/twilio/send", methods=["POST"])
 def send_via_twilio():
-    """
-    Example API:
-    {
-        "to": "+1234567890",
-        "message": "Hello from Flask!"
-    }
-    """
-    data = request.get_json()
+    data = request.get_json() or {}
     to = data.get("to")
     message = data.get("message")
-    twilio_send.send_whatsapp_message(to, message)
+    if not to or not message:
+        return jsonify({"error": "to and message required"}), 400
+
+    # log outbound message and ensure contact exists
+    with get_db_session() as db:
+        contact = db.query(Contact).filter(Contact.phone == to).first()
+        if not contact:
+            contact = Contact(phone=to, display_name=f"User {to}")
+            db.add(contact)
+            db.commit()
+            db.refresh(contact)
+
+        evt = MessagingEvent(
+            contact_id=contact.id,
+            event_type="outbound",
+            payload={"body": message, "status": "queued"},
+            created_at=datetime.datetime.utcnow(),
+        )
+        db.add(evt)
+        db.commit()
+
+    # send using your wrapper (twilio_send should raise on error)
+    try:
+        twilio_send.send_whatsapp_message(to, message)
+    except Exception:
+        logger.exception("Failed to send via Twilio")
+        # update event payload if desired (left as an exercise)
+        return jsonify({"error": "failed to send"}), 500
+
     return jsonify({"status": "sent"}), 200
 
+
 # -----------------------
-# Website Chat Endpoint ← UPDATED SECTION
+# Website Chat Endpoint (/api/chat)
+# Accepts JSON and multipart/form-data (for files)
 # -----------------------
 @app.route("/api/chat", methods=["POST"])
 def handle_web_chat():
     try:
-        # ✅ 1. HANDLE BOTH JSON AND FORM-DATA (FOR FILE UPLOADS)
+        uploaded_file = None
         if request.is_json:
             data = request.get_json()
         else:
-            # This handles form-data requests (e.g., when a file is uploaded)
-            data = request.form
-            # If a file was sent, get it
-            uploaded_file = request.files.get('file')
+            data = request.form.to_dict()
+            uploaded_file = request.files.get("file")  # may be None
 
-        logger.info(f"💬 Incoming web chat message: {data}")
+        message_text = (data.get("message") or "").strip()
+        session_id = data.get("session_id") or f"anon-{datetime.datetime.utcnow().timestamp()}"
+        widget_lang = data.get("language") or None
+        intent = data.get("intent")
 
-        # ✅ 2. EXTRACT DATA THE WIDGET SENDS (session_id, message, language, intent)
-        message_text = data.get("message", "")
-        session_id = data.get("session_id", "anon-session")
-        language = data.get("language", "en")  # Widget sends this
-        intent = data.get("intent")            # Widget might send this from quick buttons
+        # detection (use widget hint as client_hint)
+        detection_result = detect_language(message_text, client_hint=widget_lang)
+        lang = detection_result.get("lang", widget_lang or "en")
 
-        # ✅ 3. USE THE LANGUAGE FROM THE WIDGET AS THE CLIENT HINT
-        detection_result = detect_language(message_text, client_hint=language) # Use 'language' from widget
-        lang = detection_result.get('lang', language) # Fallback to widget's language if detection fails
-
-        # Build context for AI engine
         context = {
             "channel": "web",
-            "user_id": session_id,  # Using session_id as user_id for simplicity with widget
+            "user_id": session_id,
             "session_id": session_id,
             "message": message_text,
             "language": lang,
-            "conversation_history": [], # Widget handles history locally, so this can be empty
-            "intent": intent, # Pass the intent to your AI engine
-            # "user_profile": {},  # Remove or keep if your AI uses it
-            # "product_context": {} # Remove or keep if your AI uses it
+            "conversation_history": [],
+            "intent": intent,
+            "user_profile": data.get("user_profile", {}),
+            "product_context": data.get("product_context", {}),
         }
 
-        # ✅ 4. GENERATE THE REPLY USING YOUR AI ENGINE
         reply = generate_reply(context)
 
-        # ✅ 5. RETURN THE SIMPLE JSON RESPONSE THE WIDGET EXPECTS
-        return jsonify({
-            "reply": reply,          # The widget looks for this key
-            "session_id": session_id, # The widget looks for this key
-            # You can keep these for debugging, the widget will ignore them
-            "detected_language": lang,
-            "is_rtl": detection_result.get('is_rtl', False)
-        }), 200
+        # Log message (store session id as contact_id if no mapping; optionally create contact rows)
+        with get_db_session() as db:
+            # Optionally create/associate a Contact for the session (not always desired)
+            # For this example, we do not create a contact for every anonymous web session.
+            evt = MessagingEvent(
+                contact_id=None,
+                event_type="web_chat",
+                payload={
+                    "session_id": session_id,
+                    "body": message_text,
+                    "reply": reply,
+                    "language": lang,
+                    "intent": intent,
+                },
+                created_at=datetime.datetime.utcnow(),
+            )
+            db.add(evt)
+            db.commit()
+
+        return jsonify({"reply": reply, "session_id": session_id, "detected_language": lang, "is_rtl": detection_result.get("is_rtl", False)}), 200
 
     except Exception as e:
-        logger.exception("❌ Error processing web chat")
+        logger.exception("Error processing web chat: %s", e)
         return jsonify({"error": "Internal server error"}), 500
+
+
 # -----------------------
-# Optional: Language Detection Endpoint for Frontend
+# Language detection for frontend
 # -----------------------
 @app.route("/api/detect-language", methods=["POST"])
 def detect_language_endpoint():
-    """Endpoint for frontend to detect language in real-time."""
     try:
-        data = request.get_json()
-        text = data.get("text", "")
-        client_hint = data.get("hint")  # Get UI language hint from frontend
-        
-        detection_result = detect_language(text, client_hint=client_hint)
-        
-        return jsonify(detection_result), 200
-        
+        payload = request.get_json() or {}
+        text = payload.get("text", "")
+        client_hint = payload.get("hint")
+        result = detect_language(text, client_hint=client_hint)
+        return jsonify(result), 200
     except Exception as e:
-        logger.error(f"Language detection error: {e}")
-        return jsonify({"error": "Detection failed"}), 500
+        logger.exception("Language detection failed: %s", e)
+        return jsonify({"error": "detection failed"}), 500
+
 
 # -----------------------
-# Health Check
+# Health check (DB + app)
 # -----------------------
 @app.route("/healthz", methods=["GET"])
 def healthz():
-    return jsonify({"status": "ok"}), 200
+    try:
+        with get_db_session() as db:
+            # simple test query
+            db.execute("SELECT 1")
+        return jsonify({"status": "ok", "database": "connected"}), 200
+    except Exception as e:
+        logger.exception("Healthcheck DB failed: %s", e)
+        return jsonify({"status": "error", "database": "disconnected", "error": str(e)}), 500
 
+
+# -----------------------
+# Run
+# -----------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT, debug=DEBUG_MODE)
