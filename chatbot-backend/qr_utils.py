@@ -4,11 +4,12 @@ import qrcode
 import requests
 import secrets
 from sqlalchemy.orm import Session
+from typing import Optional
 
 # Import from centralized config
 from config import BITLY_TOKEN, SHORT_BASE
-from db import SessionLocal
-from db.models import QRLink
+from database import SessionLocal
+from database.models import QRLink
 
 
 def create_short_link(long_url: str) -> str:
@@ -42,7 +43,7 @@ def create_short_link(long_url: str) -> str:
         db.close()
 
 
-def get_long_url(short_code: str) -> str | None:
+def get_long_url(short_code: str) -> Optional[str]:
     """
     Look up the original long URL from a short_code in DB.
     """

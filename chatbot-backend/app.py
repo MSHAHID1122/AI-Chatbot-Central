@@ -14,11 +14,12 @@ from flask import (
 )
 from twilio.request_validator import RequestValidator
 from twilio.twiml.messaging_response import MessagingResponse
+from compliance import is_replay, record_event_v2
 
 # local modules - adjust import paths to match your project layout if needed
 from config import PORT, DEBUG_MODE, TWILIO_AUTH_TOKEN
 from ai_engine import generate_reply
-from app.i18n import detect_language   # your language detection helper
+from i18n import detect_language   # your language detection helper
 from qr_utils import parse_prefill_text  # keep load_mapping/save_mapping only if still used
 from services.support_tickets import tickets_bp, route_support_ticket
 
@@ -27,9 +28,9 @@ from database.engine import get_db_session, engine
 from database.models import (
     Base,
     Contact,
-    MessagingEvent,
+    MessageEvent,   # used for generic message / audit events
     QRLink,
-    QRScan,
+    # QRScan,        # COMMENTED OUT to get the app running now (re-enable once model/table exists)
     Ticket,
     TicketMessage,
 )
@@ -77,7 +78,7 @@ def _make_twiml_message(text: str) -> Response:
 # -----------------------
 @app.route("/")
 def index():
-    return render_template("index.html")
+    return render_template("landing.html")
 
 
 # -----------------------
@@ -87,7 +88,10 @@ def index():
 @app.route("/<short_id>", methods=["GET"])
 def redirect_short(short_id):
     """
-    Redirect users to wa.me or web.whatsapp depending on UA, log a QRScan row.
+    Redirect users to wa.me or web.whatsapp depending on UA.
+    Previously we logged a QRScan row; QRScan model is temporarily disabled.
+    Instead we log a MessageEvent (event_type='qr_redirect') for audit.
+    Re-enable QRScan usage once the qr_scans table / model exists.
     """
     ua = (request.headers.get("User-Agent") or "").lower()
     is_mobile = any(x in ua for x in ("iphone", "android", "ipad", "mobile"))
@@ -98,23 +102,35 @@ def redirect_short(short_id):
             logger.info("QR short_id not found: %s", short_id)
             return "Not found", 404
 
-        # Log scan
-        scan = QRScan(
-            qr_link_id=qr.id,
-            session_token=None,
-            ip=request.remote_addr,
-            ua=request.headers.get("User-Agent"),
-            country=None,
-            utm_source=request.args.get("utm_source"),
-            utm_medium=request.args.get("utm_medium"),
-            matched=False,
-            created_at=datetime.datetime.utcnow(),
-        )
-        db.add(scan)
-        db.commit()
+        # --- TEMP: audit log via MessageEvent instead of QRScan ---
+        try:
+            evt = MessageEvent(
+                contact_id=None,
+                direction="system",   # adapt to your MessageEvent schema (some variants use event_type/payload)
+                content=f"qr_redirect short_id={short_id} ua={request.headers.get('User-Agent')} ip={request.remote_addr}",
+                created_at=datetime.datetime.utcnow()
+            )
+            db.add(evt)
+            db.commit()
+        except Exception:
+            db.rollback()
+            logger.exception("Failed to log qr redirect as MessageEvent; continuing redirect anyway")
 
-        phone = qr.target_phone
-        prefill = qr.prefill_text or ""
+        # If you later want to add a proper QRScan row, uncomment and adapt:
+        # scan = QRScan(qr_link_id=qr.id, session_token=None, ip=request.remote_addr, ua=request.headers.get("User-Agent"), matched=False, created_at=datetime.datetime.utcnow())
+        # db.add(scan)
+        # db.commit()
+
+        # Redirect URLs (fields like `target_phone` / `prefill_text` assumed - keep consistent with your model)
+        phone = getattr(qr, "target_phone", None) or getattr(qr, "target_url", None) or ""
+        # if your QRLink stores a prefill field, use it; otherwise `target_url` may already be the wa.me link
+        prefill = getattr(qr, "prefill_text", "") or ""
+        # If `phone` is actually a full URL (target_url), prefer redirect to it:
+        if phone and phone.startswith("http"):
+            target = phone
+            logger.info("QR redirect to external URL short=%s -> %s", short_id, target)
+            return redirect(target, code=302)
+
         wa_url = f"https://wa.me/{phone}?text={quote_plus(prefill)}"
         web_url = f"https://web.whatsapp.com/send?phone={phone}&text={quote_plus(prefill)}"
 
@@ -145,14 +161,19 @@ def twilio_whatsapp_webhook():
     logger.info("Inbound Twilio message from=%s sid=%s body=%s", from_number, message_sid, (body or "")[:200])
 
     matched_short = None
-    # Persist contact + message event + try to match QR scan
+    # Persist contact + message event + try to match QR scan (QRScan table temporarily disabled)
     with get_db_session() as db:
         # find or create contact
         contact = None
         if from_number:
-            contact = db.query(Contact).filter(Contact.phone == from_number).first()
+            # adapt to your Contact model field (phone vs phone_number)
+            contact = db.query(Contact).filter((Contact.phone == from_number) | (Contact.phone_number == from_number)).first()
         if not contact:
-            contact = Contact(phone=from_number, display_name=f"WhatsApp {from_number}")
+            # create with whichever attribute your model expects
+            if hasattr(Contact, "phone"):
+                contact = Contact(phone=from_number, display_name=f"WhatsApp {from_number}")
+            else:
+                contact = Contact(phone_number=from_number, display_name=f"WhatsApp {from_number}")
             db.add(contact)
             db.commit()
             db.refresh(contact)
@@ -162,34 +183,29 @@ def twilio_whatsapp_webhook():
         if session_token:
             qr = db.query(QRLink).filter(QRLink.session_token == session_token).first()
             if qr:
-                matched_short = qr.short_id
-                # mark latest unmatched scan for this qr
-                scan = (
-                    db.query(QRScan)
-                    .filter(QRScan.qr_link_id == qr.id, QRScan.matched == False)
-                    .order_by(QRScan.created_at.desc())
-                    .first()
-                )
-                if scan:
-                    scan.matched = True
-                    scan.matched_at = datetime.datetime.utcnow()
-                    scan.matched_contact_id = contact.id
-                    db.add(scan)
+                matched_short = getattr(qr, "short_id", None) or getattr(qr, "short_code", None)
+                # previously we would mark a QRScan row as matched here — QRScan is disabled for now
+                # if QRScan model exists later, you may update it here
 
-        # record messaging event
-        evt = MessagingEvent(
-            contact_id=contact.id,
-            event_type="inbound",
-            payload={
-                "body": body,
-                "parsed": parsed,
-                "short_id": matched_short,
-                "message_sid": message_sid,
-            },
-            created_at=datetime.datetime.utcnow(),
-        )
-        db.add(evt)
-        db.commit()
+        # record messaging event (use MessageEvent to log inbound with payload)
+        try:
+            # some MessageEvent schemas use different columns - adjust accordingly
+            evt = MessageEvent(
+                contact_id=contact.id,
+                direction="inbound",
+                content=str({
+                    "body": body,
+                    "parsed": parsed,
+                    "short_id": matched_short,
+                    "message_sid": message_sid,
+                }),
+                created_at=datetime.datetime.utcnow(),
+            )
+            db.add(evt)
+            db.commit()
+        except Exception:
+            db.rollback()
+            logger.exception("Failed to write MessageEvent for inbound message")
 
     # Build response using logic: qr:, support flow, or AI
     try:
@@ -198,7 +214,6 @@ def twilio_whatsapp_webhook():
             reply_text = f"Thanks for scanning QR for {item}! 🎉 We'll send you more details soon."
         elif any(tok in body.lower() for tok in ("help", "support", "problem", "issue")):
             # create support ticket
-            # route_support_ticket returns dict with ticket_id, external_id, provider
             try:
                 ticket_res = route_support_ticket(
                     user={
@@ -210,7 +225,7 @@ def twilio_whatsapp_webhook():
                     metadata={"channel": "whatsapp", "product_tag": parsed.get("product_id"), "subject": f"WhatsApp Support: {body[:50]}"},
                 )
                 reply_text = f"✅ Support ticket #{ticket_res.get('ticket_id')} created! Our team will contact you shortly."
-            except Exception as e:
+            except Exception:
                 logger.exception("Support ticket creation failed")
                 reply_text = "⚠️ We're experiencing technical difficulties creating a support ticket. Please try again later."
         else:
@@ -230,13 +245,13 @@ def twilio_whatsapp_webhook():
             reply_text = generate_reply(context)
 
         # return TwiML
-        return _make_twiml_response(reply_text)
+        return _make_twiml_message(reply_text)
     except Exception as exc:
         logger.exception("Error handling Twilio webhook: %s", exc)
-        return _make_twiml_response("⚠️ Internal error processing your message. Please try again later."), 500
+        return _make_twiml_message("⚠️ Internal error processing your message. Please try again later."), 500
 
 
-def _make_twiml_response(text: str) -> Response:
+def _make_twiml_message(text: str) -> Response:
     resp = MessagingResponse()
     resp.message(text)
     return Response(str(resp), mimetype="application/xml")
@@ -255,17 +270,20 @@ def send_via_twilio():
 
     # log outbound message and ensure contact exists
     with get_db_session() as db:
-        contact = db.query(Contact).filter(Contact.phone == to).first()
+        contact = db.query(Contact).filter((Contact.phone == to) | (Contact.phone_number == to)).first()
         if not contact:
-            contact = Contact(phone=to, display_name=f"User {to}")
+            if hasattr(Contact, "phone"):
+                contact = Contact(phone=to, display_name=f"User {to}")
+            else:
+                contact = Contact(phone_number=to, display_name=f"User {to}")
             db.add(contact)
             db.commit()
             db.refresh(contact)
 
-        evt = MessagingEvent(
+        evt = MessageEvent(
             contact_id=contact.id,
-            event_type="outbound",
-            payload={"body": message, "status": "queued"},
+            direction="outbound",
+            content=str({"body": message, "status": "queued"}),
             created_at=datetime.datetime.utcnow(),
         )
         db.add(evt)
@@ -276,7 +294,6 @@ def send_via_twilio():
         twilio_send.send_whatsapp_message(to, message)
     except Exception:
         logger.exception("Failed to send via Twilio")
-        # update event payload if desired (left as an exercise)
         return jsonify({"error": "failed to send"}), 500
 
     return jsonify({"status": "sent"}), 200
@@ -321,18 +338,16 @@ def handle_web_chat():
 
         # Log message (store session id as contact_id if no mapping; optionally create contact rows)
         with get_db_session() as db:
-            # Optionally create/associate a Contact for the session (not always desired)
-            # For this example, we do not create a contact for every anonymous web session.
-            evt = MessagingEvent(
+            evt = MessageEvent(
                 contact_id=None,
-                event_type="web_chat",
-                payload={
+                direction="web_chat",
+                content=str({
                     "session_id": session_id,
                     "body": message_text,
                     "reply": reply,
                     "language": lang,
                     "intent": intent,
-                },
+                }),
                 created_at=datetime.datetime.utcnow(),
             )
             db.add(evt)
